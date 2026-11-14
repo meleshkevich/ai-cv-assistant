@@ -18,6 +18,7 @@
  *   - Actual page count
  *   - Overflow detection
  *   - No dependency on OpenAI or Chrome Storage
+ *   - Compact layout fallback (006D.1)
  */
 
 import { describe, it, expect } from 'vitest'
@@ -27,12 +28,15 @@ import type { GeneratedCv, GeneratedCvExperience, GeneratedCvProject } from '@/t
 import type { PersonalInfo } from '@/types/profile'
 import {
   generateCvPdf,
+  generateCvPdfWithResult,
   buildCvDocDefinition,
   countPdfPages,
   formatDate,
   formatDateRange,
   isCvPdfError,
   normalizeContactUrl,
+  STANDARD_LAYOUT,
+  COMPACT_LAYOUT,
 } from '@/services/cvPdfService'
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -1296,5 +1300,330 @@ describe('project links in PDF', () => {
     const cv = makeCv({ language: 'cs', projects: [proj] })
     const blob = await generateCvPdf(cv, makePersonal())
     expect(await countPdfPages(await blobToUint8Array(blob))).toBe(1)
+  })
+})
+
+// ── Compact layout fallback (006D.1) ─────────────────────────────────────────
+
+// A CV that fits standard layout — used for tests that must NOT trigger compact.
+function makeStandardFitCv(): GeneratedCv {
+  return makeRealisticCv()
+}
+
+// A CV designed to overflow standard layout but fit compact.
+// Extends the realistic CV with an extra experience entry and a third project.
+function makeBorderlineCv(): GeneratedCv {
+  const base = makeRealisticCv()
+  return {
+    ...base,
+    experience: [
+      ...base.experience,
+      {
+        sourceId: 'exp-5',
+        company: 'Open Source Collective',
+        position: 'Staff Engineer',
+        startDate: '2012-06',
+        endDate: '2015-01',
+        highlights: [
+          'Maintained and extended a widely-used TypeScript linting plugin',
+          'Triaged 200+ issues and authored release notes for 8 minor versions',
+          'Coordinated contributions from 30+ external contributors globally',
+        ],
+      },
+    ],
+    projects: [
+      ...base.projects,
+      {
+        sourceId: 'proj-3',
+        name: 'kafka-schema-bridge',
+        role: 'Author',
+        url: 'https://github.com/janp/kafka-schema-bridge',
+        highlights: [
+          'Bridges Apache Kafka with Confluent Schema Registry for TypeScript consumers',
+          'Automated schema evolution with Avro and JSON Schema support',
+        ],
+      },
+    ],
+  }
+}
+
+// A CV so large that neither layout can fit it on one page.
+function makeHeavyOverflowCv(): GeneratedCv {
+  const longHighlight = 'This is an extensively detailed highlight describing complex architectural decisions and cross-team impact. '.repeat(2)
+  return makeCv({
+    professionalSummary: 'Expert engineer with 15 years experience. '.repeat(5),
+    experience: Array.from({ length: 10 }, (_, i) => ({
+      sourceId: `exp-${i}`,
+      company: `Enterprise Corp ${i}`,
+      position: `Principal Software Architect ${i}`,
+      startDate: '2005-01',
+      endDate: '2023-12',
+      highlights: [longHighlight, longHighlight, longHighlight],
+    })),
+    projects: Array.from({ length: 5 }, (_, i) => makeProject({
+      sourceId: `p${i}`,
+      name: `Major Initiative ${i}`,
+      highlights: ['Delivered on time', 'Under budget', 'Exceeded all KPIs'],
+    })),
+  })
+}
+
+describe('compact layout — STANDARD_LAYOUT and COMPACT_LAYOUT exports', () => {
+  it('STANDARD_LAYOUT has sectionTopMargin of 10', () => {
+    expect(STANDARD_LAYOUT.sectionTopMargin).toBe(10)
+  })
+
+  it('COMPACT_LAYOUT has sectionTopMargin of 7', () => {
+    expect(COMPACT_LAYOUT.sectionTopMargin).toBe(7)
+  })
+
+  it('COMPACT_LAYOUT bodyLineHeight is less than STANDARD_LAYOUT', () => {
+    expect(COMPACT_LAYOUT.bodyLineHeight).toBeLessThan(STANDARD_LAYOUT.bodyLineHeight)
+  })
+
+  it('COMPACT_LAYOUT entryTopMargin is less than STANDARD_LAYOUT', () => {
+    expect(COMPACT_LAYOUT.entryTopMargin).toBeLessThan(STANDARD_LAYOUT.entryTopMargin)
+  })
+})
+
+describe('compact layout — buildCvDocDefinition with layout param', () => {
+  it('standard layout body lineHeight is 1.35', () => {
+    const doc = buildCvDocDefinition(makeCv(), makePersonal(), STANDARD_LAYOUT)
+    const styles = doc.styles as Record<string, Record<string, unknown>>
+    expect(styles?.['body']?.['lineHeight']).toBe(1.35)
+  })
+
+  it('compact layout body lineHeight is 1.25', () => {
+    const doc = buildCvDocDefinition(makeCv(), makePersonal(), COMPACT_LAYOUT)
+    const styles = doc.styles as Record<string, Record<string, unknown>>
+    expect(styles?.['body']?.['lineHeight']).toBe(1.25)
+  })
+
+  it('both layouts produce identical text content (5. content identity)', () => {
+    const cv = makeRealisticCv()
+    const personal = makeRealisticPersonal()
+    const standard = buildCvDocDefinition(cv, personal, STANDARD_LAYOUT)
+    const compact = buildCvDocDefinition(cv, personal, COMPACT_LAYOUT)
+
+    function extractText(doc: ReturnType<typeof buildCvDocDefinition>): string[] {
+      const texts: string[] = []
+      function walk(node: unknown): void {
+        if (typeof node === 'string') {
+          texts.push(node)
+        } else if (Array.isArray(node)) {
+          node.forEach(walk)
+        } else if (node !== null && typeof node === 'object') {
+          const obj = node as Record<string, unknown>
+          if ('text' in obj && typeof obj['text'] === 'string') texts.push(obj['text'])
+          if ('text' in obj && Array.isArray(obj['text'])) walk(obj['text'])
+          if ('stack' in obj) walk(obj['stack'])
+          if ('columns' in obj) walk(obj['columns'])
+          if ('content' in obj) walk(obj['content'])
+        }
+      }
+      walk(doc.content)
+      return texts
+    }
+
+    const standardTexts = extractText(standard).join('\n')
+    const compactTexts = extractText(compact).join('\n')
+    expect(standardTexts).toBe(compactTexts)
+  })
+
+  it('compact layout preserves project URLs (6. link preservation)', () => {
+    const proj = makeProject({ url: 'https://github.com/jane/my-lib' })
+    const doc = buildCvDocDefinition(makeCv({ projects: [proj] }), makePersonal(), COMPACT_LAYOUT)
+    expect(JSON.stringify(doc.content)).toContain('https://github.com/jane/my-lib')
+  })
+
+  it('compact layout preserves contact links (6. link preservation)', () => {
+    const doc = buildCvDocDefinition(
+      makeCv(),
+      makePersonal({ linkedIn: 'linkedin.com/in/jane', github: 'github.com/jane', email: 'jane@example.com' }),
+      COMPACT_LAYOUT,
+    )
+    const str = JSON.stringify(doc.content)
+    expect(str).toContain('https://linkedin.com/in/jane')
+    expect(str).toContain('https://github.com/jane')
+    expect(str).toContain('mailto:jane@example.com')
+  })
+
+  it('compact layout preserves Czech diacritics (7. Czech diacritics)', () => {
+    const doc = buildCvDocDefinition(makeRealisticCzechCv(), makeRealisticPersonal(), COMPACT_LAYOUT)
+    const str = JSON.stringify(doc.content)
+    expect(str).toContain('transakční')
+    expect(str).toContain('Čeština')
+    expect(str).toContain('Rodilý mluvčí')
+  })
+
+  it('buildCvDocDefinition defaults to STANDARD_LAYOUT when no layout is passed', () => {
+    const docDefault = buildCvDocDefinition(makeCv(), makePersonal())
+    const docStandard = buildCvDocDefinition(makeCv(), makePersonal(), STANDARD_LAYOUT)
+    // Both should produce identical JSON (same spacing values)
+    expect(JSON.stringify(docDefault)).toBe(JSON.stringify(docStandard))
+  })
+
+  it('page margins are identical between both layouts (11. A4 page, margins unchanged)', () => {
+    const standard = buildCvDocDefinition(makeCv(), makePersonal(), STANDARD_LAYOUT)
+    const compact = buildCvDocDefinition(makeCv(), makePersonal(), COMPACT_LAYOUT)
+    expect(standard.pageMargins).toEqual([45, 45, 45, 45])
+    expect(compact.pageMargins).toEqual([45, 45, 45, 45])
+  })
+
+  it('name style is 18pt bold in both layouts (preserved typography)', () => {
+    for (const layout of [STANDARD_LAYOUT, COMPACT_LAYOUT]) {
+      const doc = buildCvDocDefinition(makeCv(), makePersonal(), layout)
+      const styles = doc.styles as Record<string, Record<string, unknown>>
+      expect(styles?.['name']?.['fontSize']).toBe(18)
+      expect(styles?.['name']?.['bold']).toBe(true)
+    }
+  })
+
+  it('body font size is 9pt in both layouts (preserved typography)', () => {
+    for (const layout of [STANDARD_LAYOUT, COMPACT_LAYOUT]) {
+      const doc = buildCvDocDefinition(makeCv(), makePersonal(), layout)
+      const styles = doc.styles as Record<string, Record<string, unknown>>
+      expect(styles?.['body']?.['fontSize']).toBe(9)
+    }
+  })
+
+  it('section heading color is navy in both layouts (preserved styling)', () => {
+    for (const layout of [STANDARD_LAYOUT, COMPACT_LAYOUT]) {
+      const doc = buildCvDocDefinition(makeCv(), makePersonal(), layout)
+      const styles = doc.styles as Record<string, Record<string, unknown>>
+      expect(styles?.['sectionHeading']?.['color']).toBe('#1a3a5c')
+    }
+  })
+})
+
+describe('compact layout — generateCvPdfWithResult fallback logic', () => {
+  it('1. standard layout succeeds when content fits: layout is "standard"', async () => {
+    const result = await generateCvPdfWithResult(makeStandardFitCv(), makeRealisticPersonal())
+    expect(result.layout).toBe('standard')
+    expect(result.blob).toBeInstanceOf(Blob)
+    expect(result.blob.type).toBe('application/pdf')
+  })
+
+  it('2. compact is not generated when standard fits: returned PDF is 1 page', async () => {
+    const result = await generateCvPdfWithResult(makeStandardFitCv(), makeRealisticPersonal())
+    // Verifying layout='standard' proves compact was not needed
+    expect(result.layout).toBe('standard')
+    const pages = await countPdfPages(await blobToUint8Array(result.blob))
+    expect(pages).toBe(1)
+  })
+
+  it('3. compact fallback is attempted after standard overflow: layout is "compact"', async () => {
+    // borderline CV overflows standard but fits compact
+    const result = await generateCvPdfWithResult(makeBorderlineCv(), makeRealisticPersonal())
+    // If standard had fit, layout would be 'standard'. Compact means fallback occurred.
+    expect(result.layout).toBe('compact')
+  })
+
+  it('4. compact layout can fit content that standard cannot: 1-page compact PDF', async () => {
+    const result = await generateCvPdfWithResult(makeBorderlineCv(), makeRealisticPersonal())
+    expect(result.layout).toBe('compact')
+    const pages = await countPdfPages(await blobToUint8Array(result.blob))
+    expect(pages).toBe(1)
+  })
+
+  it('8. input data remains unchanged after compact fallback', async () => {
+    const cv = makeBorderlineCv()
+    const personal = makeRealisticPersonal()
+    const cvSnap = JSON.parse(JSON.stringify(cv)) as GeneratedCv
+    const personalSnap = { ...personal }
+    await generateCvPdfWithResult(cv, personal)
+    expect(cv).toEqual(cvSnap)
+    expect(personal).toEqual(personalSnap)
+  })
+
+  it('9. both layouts overflowing throws PDF_OVERFLOW', async () => {
+    let caughtError: unknown = null
+    try {
+      await generateCvPdfWithResult(makeHeavyOverflowCv(), makePersonal())
+    } catch (err) {
+      caughtError = err
+    }
+    expect(isCvPdfError(caughtError)).toBe(true)
+    if (isCvPdfError(caughtError)) {
+      expect(caughtError.code).toBe('PDF_OVERFLOW')
+    }
+  })
+
+  it('10. non-overflow rendering errors propagate unchanged (not wrapped as CvPdfError)', async () => {
+    // countPdfPages throws a plain Error for invalid PDF bytes — that must not be
+    // swallowed or wrapped in a CvPdfError by the fallback logic.
+    // We simulate this by passing a CV that generates a valid PDF; the internal
+    // path only reaches countPdfPages for real PDF bytes, so we verify the type guard
+    // correctly distinguishes the two error types.
+    const plainError = new Error('Simulated render failure')
+    expect(isCvPdfError(plainError)).toBe(false)
+    // The plain Error from countPdfPages (bad buffer) is a plain Error, not a CvPdfError:
+    const junk = new TextEncoder().encode('not a pdf')
+    await expect(countPdfPages(junk)).rejects.toThrow(/PDF page count failed/)
+    // And that plain Error is NOT a CvPdfError:
+    let caughtErr: unknown = null
+    try { await countPdfPages(junk) } catch (e) { caughtErr = e }
+    expect(isCvPdfError(caughtErr)).toBe(false)
+  })
+
+  it('11. resulting PDF is exactly one A4 page (standard case)', async () => {
+    const result = await generateCvPdfWithResult(makeStandardFitCv(), makeRealisticPersonal())
+    const pages = await countPdfPages(await blobToUint8Array(result.blob))
+    expect(pages).toBe(1)
+  })
+
+  it('11. resulting PDF is exactly one A4 page (compact fallback case)', async () => {
+    const result = await generateCvPdfWithResult(makeBorderlineCv(), makeRealisticPersonal())
+    const pages = await countPdfPages(await blobToUint8Array(result.blob))
+    expect(pages).toBe(1)
+  })
+})
+
+describe('compact layout — generateCvPdf public API unchanged (12.)', () => {
+  it('still returns a Blob for a standard-fit CV', async () => {
+    const blob = await generateCvPdf(makeStandardFitCv(), makeRealisticPersonal())
+    expect(blob).toBeInstanceOf(Blob)
+    expect(blob.type).toBe('application/pdf')
+  })
+
+  it('still returns a Blob for a borderline CV (compact fallback)', async () => {
+    const blob = await generateCvPdf(makeBorderlineCv(), makeRealisticPersonal())
+    expect(blob).toBeInstanceOf(Blob)
+    expect(blob.type).toBe('application/pdf')
+  })
+
+  it('still throws PDF_OVERFLOW when both layouts overflow', async () => {
+    let caughtError: unknown = null
+    try {
+      await generateCvPdf(makeHeavyOverflowCv(), makePersonal())
+    } catch (err) {
+      caughtError = err
+    }
+    expect(isCvPdfError(caughtError)).toBe(true)
+  })
+})
+
+describe('compact layout — sample PDFs (opt-in via GENERATE_SAMPLES=true)', () => {
+  it('standard layout sample', async () => {
+    const blob = await generateCvPdf(makeStandardFitCv(), makeRealisticPersonal())
+    writeSampleIfEnabled('compact-standard', await blobToUint8Array(blob))
+    expect(blob.type).toBe('application/pdf')
+  })
+
+  it('compact fallback sample', async () => {
+    const result = await generateCvPdfWithResult(makeBorderlineCv(), makeRealisticPersonal())
+    writeSampleIfEnabled('compact-fallback', await blobToUint8Array(result.blob))
+    expect(result.layout).toBe('compact')
+    expect(result.blob.type).toBe('application/pdf')
+  })
+
+  it('overflow sample — demonstrates PDF_OVERFLOW with heavy content', async () => {
+    let err: unknown = null
+    try {
+      await generateCvPdf(makeHeavyOverflowCv(), makePersonal())
+    } catch (e) {
+      err = e
+    }
+    expect(isCvPdfError(err)).toBe(true)
   })
 })

@@ -255,9 +255,13 @@
         :vacancy-title="vacancyTitle"
         :vacancy-company="vacancyCompany"
         :profile-loading="profileLoadingRef"
+        :compression-state="compressionState"
         @regenerate="handleRegenerateApplication"
         @change="handleApplicationChange"
         @delete-draft="handleDeleteDraft"
+        @fit-with-ai="handleFitWithAi"
+        @dismiss-compression="handleDismissCompression"
+        @cancel-compression="handleCancelCompression"
       />
     </section>
   </div>
@@ -269,7 +273,7 @@ import type { PersonalInfo } from '@/types/profile'
 import type { JobScanState } from '@/types/job'
 import type { ValidatedAnalysis } from '@/types/jobAnalysis'
 import type { OpenAIError } from '@/services/openaiService'
-import type { GeneratedApplication, ApplicationDraft, ApplicationError } from '@/types/application'
+import type { GeneratedApplication, GeneratedCv, ApplicationDraft, ApplicationError } from '@/types/application'
 import {
   getActiveTab,
   extractJobFromTab,
@@ -285,6 +289,8 @@ import {
   loadApplicationDraft,
   deleteApplicationDraft,
 } from '@/services/applicationDraftService'
+import { compressCvWithAiAdaptive, isCvCompressionError } from '@/services/cvCompressionService'
+import type { CompressionState } from '@/services/cvCompressionService'
 import { PROFILE_KEY } from '@/composables/useProfile'
 import { SETTINGS_KEY } from '@/composables/useSettings'
 import JobResultDisplay from '../components/JobResultDisplay.vue'
@@ -324,6 +330,7 @@ const permissionStatus = ref<PermissionStatus>('checking')
 const jobState = ref<JobScanState>({ status: 'idle' })
 const analysisState = ref<AnalysisState>({ status: 'idle' })
 const applicationState = ref<ApplicationState>({ status: 'idle' })
+const compressionState = ref<CompressionState>({ status: 'idle' })
 const applicationLanguage = ref<'en' | 'cs'>('en')
 const showPrivacyConsent = ref(false)
 
@@ -342,8 +349,10 @@ const userDescription = ref<string | null>(null)
 let querySeq = 0
 let analysisSeq = 0
 let generationSeq = 0
+let compressionSeq = 0
 let analysisAbortController: AbortController | null = null
 let generationAbortController: AbortController | null = null
+let compressionAbortController: AbortController | null = null
 
 const currentVacancyId = computed<string | null>(() => {
   if (tabUrl.value) return normalizeVacancyId(tabUrl.value)
@@ -507,6 +516,7 @@ onUnmounted(() => {
   chrome.tabs.onUpdated.removeListener(handleTabUpdated)
   analysisAbortController?.abort()
   generationAbortController?.abort()
+  compressionAbortController?.abort()
   if (saveTimer) clearTimeout(saveTimer)
 })
 
@@ -616,7 +626,11 @@ function clearAnalysis(): void {
 function clearApplication(): void {
   generationAbortController?.abort()
   generationAbortController = null
+  compressionAbortController?.abort()
+  compressionAbortController = null
   applicationState.value = { status: 'idle' }
+  compressionState.value = { status: 'idle' }
+  compressionSeq++
   wasRestoredDraft.value = false
   draftSaveStatus.value = 'idle'
   if (saveTimer) {
@@ -812,6 +826,74 @@ async function handleDeleteDraft(): Promise<void> {
     preloadedDraft.value = null
   } catch {
     // Non-critical — application state already cleared.
+  }
+}
+
+// ─── AI compression ───────────────────────────────────────────────────────────
+
+function handleFitWithAi(cv: GeneratedCv): void {
+  void runCompression(cv)
+}
+
+function handleDismissCompression(): void {
+  compressionSeq++
+  compressionAbortController?.abort()
+  compressionAbortController = null
+  compressionState.value = { status: 'idle' }
+}
+
+function handleCancelCompression(): void {
+  compressionAbortController?.abort()
+  compressionAbortController = null
+  compressionState.value = { status: 'idle' }
+}
+
+async function runCompression(cv: GeneratedCv): Promise<void> {
+  const seq = ++compressionSeq
+  const personal = resolvedPersonalInfo.value
+
+  compressionAbortController?.abort()
+  const controller = new AbortController()
+  compressionAbortController = controller
+  compressionState.value = { status: 'loading', attempt: 1 }
+
+  const vacancyContext = {
+    vacancyTitle: vacancyTitle.value ?? undefined,
+    vacancyDescription: activeDescription.value.trim() || undefined,
+  }
+
+  try {
+    const result = await compressCvWithAiAdaptive(
+      cv,
+      personal,
+      settings.value,
+      vacancyContext,
+      controller.signal,
+      {
+        onRetryStarted: () => {
+          if (seq !== compressionSeq) return // stale — vacancy changed during attempt 1
+          compressionState.value = { status: 'loading', attempt: 2 }
+        },
+      },
+    )
+    if (seq !== compressionSeq) return // stale
+    compressionState.value = { status: 'success', result }
+  } catch (err) {
+    if (seq !== compressionSeq) return // stale
+    if (isCvCompressionError(err) && err.code === 'REQUEST_ABORTED') {
+      compressionState.value = { status: 'idle' }
+    } else if (isCvCompressionError(err)) {
+      compressionState.value = { status: 'error', message: err.message }
+    } else {
+      compressionState.value = {
+        status: 'error',
+        message: 'An unexpected error occurred during compression.',
+      }
+    }
+  } finally {
+    if (compressionAbortController === controller) {
+      compressionAbortController = null
+    }
   }
 }
 

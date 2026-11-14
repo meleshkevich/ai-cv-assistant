@@ -28,8 +28,9 @@ The generated documents remain fully editable before export.
 
 Extract job descriptions directly from the active browser tab.
 
+- Applies site-specific CSS selectors for supported job boards (LinkedIn, jobs.cz) where available.
 - Reads structured `JobPosting` data from JSON-LD when available.
-- Uses DOM-based heuristics as a fallback.
+- Uses DOM-based heuristics as a final fallback.
 - Extracts available job metadata, including title, company, and location.
 - Displays extraction confidence and method.
 - Allows users to review and edit extracted text.
@@ -82,7 +83,7 @@ Suggestions for documenting missing details, measurable achievements, or additio
 
 Application strategies are passed to the document-generation step. Profile-improvement suggestions remain informational and are not treated as evidence of qualifications.
 
-### Tailored cover letters and resumes
+### Tailored cover letters and CVs
 
 Generate application-specific documents in **English or Czech**.
 
@@ -92,7 +93,7 @@ Generate application-specific documents in **English or Czech**.
 - Generated from the Master Profile and job analysis
 - Editable before copying or sending
 
-**Resumes**
+**CV**
 
 - Tailored professional title and summary
 - Relevant technical skills
@@ -197,7 +198,7 @@ Suggested demonstrations:
 | Build tooling | Vite |
 | Browser platform | Chrome Extensions Manifest V3 |
 | User interface | Chrome Side Panel API |
-| Job extraction | JSON-LD, DOM parsing, content heuristics |
+| Job extraction | Site-specific selectors, JSON-LD, DOM parsing, content heuristics |
 | AI integration | OpenAI Responses API, structured JSON output |
 | Data persistence | Chrome Storage API |
 | PDF generation | pdfmake |
@@ -213,7 +214,7 @@ AI Job Assistant separates browser interaction, application state, AI services, 
 
 **Job extraction**
 
-Identifies structured job data and extracts relevant content from the active tab.
+Applies a staged extraction pipeline: site-specific CSS selectors (LinkedIn, jobs.cz), structured JSON-LD, DOM heuristics, and a body-text fallback. Identifies structured job data and extracts relevant content from the active tab.
 
 **Master Profile management**
 
@@ -238,6 +239,32 @@ Transforms the current CV data into an A4 document and verifies that it contains
 **Vue Side Panel**
 
 Provides the interface for reviewing job descriptions, maintaining profile data, analyzing requirements, editing application materials, and downloading resumes.
+
+### Project structure
+
+```
+src/
+├── background/         # Service worker (panel behaviour setup)
+├── content/            # Injected functions: job extraction pipeline
+├── prompts/            # OpenAI prompt builders and JSON schemas
+├── services/           # AI, PDF, storage, and tab services
+│   ├── jobAnalysisService.ts
+│   ├── applicationService.ts
+│   ├── cvPdfService.ts
+│   ├── applicationDraftService.ts
+│   └── ...
+├── composables/        # Vue composables: profile, settings, PDF download
+├── types/              # TypeScript interfaces: profile, job, analysis, application
+├── utils/              # Job extraction helpers, validators, site registry
+└── sidepanel/          # Vue app: views and components
+
+tests/
+├── profile/            # Profile model, validation, service
+├── job/                # Extraction, analysis, registry, stale guards
+├── application/        # Draft service, restore flow, generation
+├── composables/        # PDF download composable
+└── pdf/                # PDF rendering and overflow
+```
 
 ### Design principles
 
@@ -265,7 +292,7 @@ Provides the interface for reviewing job descriptions, maintaining profile data,
 Clone the repository and install dependencies:
 
 ```bash
-git clone <REPOSITORY_URL>
+git clone https://github.com/meleshkevich/ai-cv-assistant
 cd ai-job-assistant
 npm ci
 ```
@@ -344,6 +371,8 @@ The automated tests cover areas including:
 - Master Profile validation and persistence
 - JSON import/export behavior
 - Job extraction and DOM heuristics
+- Job site registry and site-specific selector matching
+- Stale extraction result handling
 - Job analysis response validation
 - Evidence and source-reference matching
 - AI application generation
@@ -417,7 +446,7 @@ Known limitations include:
 
 Potential future improvements:
 
-- Additional job-site extraction adapters
+- Broader site-specific extraction coverage
 - Improved control over CV content density
 - More export options and document templates
 - Better review and comparison of generated applications

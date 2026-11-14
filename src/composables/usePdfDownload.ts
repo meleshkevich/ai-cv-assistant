@@ -38,6 +38,9 @@ export function usePdfDownload(
 ) {
   const pdfGenerating = ref(false)
   const pdfError = ref<string | null>(null)
+  // Set to true when the error is specifically PDF_OVERFLOW (both layouts overflow).
+  // The UI uses this to show the AI compression option instead of a plain error.
+  const pdfIsOverflow = ref(false)
 
   // Button is disabled while the profile is loading OR a PDF is being generated.
   // This prevents the UI from showing a misleading "missing full name" error when
@@ -46,6 +49,7 @@ export function usePdfDownload(
 
   function clearPdfError(): void {
     pdfError.value = null
+    pdfIsOverflow.value = false
   }
 
   async function downloadPdf(): Promise<void> {
@@ -85,8 +89,9 @@ export function usePdfDownload(
       }
     } catch (err) {
       if (isCvPdfErrorFn?.(err)) {
-        pdfError.value =
-          'Your CV content is too long for one A4 page. Shorten the summary or some experience/project highlights and try again.'
+        // PDF_OVERFLOW is the only CvPdfErrorCode — both layouts overflowed.
+        pdfIsOverflow.value = true
+        pdfError.value = 'Your CV content is too long for one A4 page even in compact layout.'
       } else {
         pdfError.value = 'PDF generation failed. Please try again.'
       }
@@ -95,5 +100,5 @@ export function usePdfDownload(
     }
   }
 
-  return { pdfGenerating, pdfButtonDisabled, pdfError, clearPdfError, downloadPdf }
+  return { pdfGenerating, pdfButtonDisabled, pdfError, pdfIsOverflow, clearPdfError, downloadPdf }
 }
