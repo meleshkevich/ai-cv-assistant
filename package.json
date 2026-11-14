@@ -1,0 +1,30 @@
+{
+  "name": "ai-job-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "prebuild": "node scripts/create-icons.mjs",
+    "build": "vue-tsc -p tsconfig.app.json --noEmit && vite build",
+    "typecheck": "vue-tsc -p tsconfig.app.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfmake": "^0.3.14",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^26.6.6",
+    "@types/pdfmake": "^0.3.3",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "jsdom": "^31.0.0",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.8",
+    "vitest": "^3.2.7",
+    "vue-tsc": "^2.0.14"
+  }
+}
