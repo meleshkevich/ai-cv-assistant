@@ -19,6 +19,7 @@ export interface ResponsesAPIRequest {
   }
   store: false
   temperature?: number
+  reasoning?: { effort: 'low' | 'medium' | 'high' }
   max_output_tokens?: number
 }
 
@@ -38,10 +39,16 @@ export interface ResponsesAPIResponse {
   status: 'completed' | 'incomplete' | 'in_progress' | 'failed'
   output: OpenAIOutputItem[]
   model: string
+  /** Present when status is 'incomplete'. */
+  incomplete_details?: { reason: string }
   usage?: {
     input_tokens: number
     output_tokens: number
     total_tokens: number
+    /** Present for reasoning models; counts tokens consumed by internal reasoning. */
+    output_tokens_details?: {
+      reasoning_tokens?: number
+    }
   }
 }
 

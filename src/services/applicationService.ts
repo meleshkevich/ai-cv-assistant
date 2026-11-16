@@ -10,6 +10,8 @@ import {
 } from '@/prompts/generateApplication'
 import { callResponsesAPI, extractOutputText } from '@/services/openaiService'
 import { parseAndValidateApplication, verifyApplicationSources } from '@/utils/applicationValidator'
+import { buildSamplingOptions } from '@/services/openaiModelConfig'
+import { buildSourceTokenMap, resolveTokensToIds } from '@/utils/sourceTokenMap'
 
 const MAX_INPUT_CHARS = 400_000
 
@@ -155,7 +157,8 @@ async function runGenerationPipeline(
   }
 
   devLog('build-user-message')
-  const userMessage = buildApplicationUserMessage(jobDescription, profile, analysis, language)
+  const tokenMap = buildSourceTokenMap(profile)
+  const userMessage = buildApplicationUserMessage(jobDescription, profile, analysis, language, tokenMap)
   if (userMessage.length > MAX_INPUT_CHARS) {
     throwError(
       'INPUT_TOO_LARGE',
@@ -178,7 +181,7 @@ async function runGenerationPipeline(
       },
     },
     store: false as const,
-    temperature: 0.4,
+    ...buildSamplingOptions(settings.openaiModel, { standardTemperature: 0.4, reasoningEffort: 'medium' }),
     max_output_tokens: 8192,
   }
 
@@ -233,6 +236,22 @@ async function runGenerationPipeline(
     devLog('schema-validate-failed', { detail })
     throwError('SCHEMA_VIOLATION', `Generated application schema error: ${detail}`)
   }
+
+  // ── Resolve short source tokens to canonical profile UUIDs ─────────────────
+  // The AI returns EXP_N / PROJ_N tokens (not raw UUIDs). Convert them back to
+  // the canonical profile IDs before any further validation or storage.
+
+  const { application: tokenResolved, issues: tokenIssues } = resolveTokensToIds(application, tokenMap)
+  devLog('token-resolve', { issueCount: tokenIssues.length })
+
+  if (tokenIssues.length > 0) {
+    const details = tokenIssues.map((i) => i.message).join('; ')
+    throwError(
+      'INVALID_SOURCE_IDS',
+      `Generated content contains invalid source tokens: ${details}. Please retry.`,
+    )
+  }
+  application = tokenResolved
 
   // Replace AI-generated education/languages with the canonical Master Profile values.
   // The AI may omit, paraphrase, or reorder these; the profile is the authoritative source.

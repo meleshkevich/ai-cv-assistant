@@ -10,6 +10,7 @@ import {
   CV_COMPRESSION_SCHEMA,
 } from '@/prompts/compressCv'
 import type { CompressionPromptOptions } from '@/prompts/compressCv'
+import { buildSamplingOptions } from './openaiModelConfig'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -343,7 +344,7 @@ export async function compressCvWithAi(
       },
     },
     store: false,
-    temperature: 0.1,
+    ...buildSamplingOptions(settings.openaiModel, { standardTemperature: 0.1, reasoningEffort: 'low' }),
   }
 
   // Call the API — only errors from callResponsesAPI are caught here.

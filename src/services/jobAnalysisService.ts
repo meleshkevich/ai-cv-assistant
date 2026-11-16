@@ -5,6 +5,7 @@ import { isProfileEmpty } from '@/types/profile'
 import { buildSystemPrompt, buildUserMessage, JOB_ANALYSIS_SCHEMA } from '@/prompts/analyzeJob'
 import { callResponsesAPI, extractOutputText } from '@/services/openaiService'
 import type { OpenAIError } from '@/services/openaiService'
+import { buildSamplingOptions, getAnalysisOutputBudget } from '@/services/openaiModelConfig'
 import { parseAndValidateAnalysis, verifyAnalysis } from '@/utils/jobAnalysisValidator'
 
 export type { OpenAIError } from '@/services/openaiService'
@@ -102,6 +103,8 @@ async function runAnalysisPipeline(
 
   // ── Build request ──────────────────────────────────────────────────────────
 
+  const outputBudget = getAnalysisOutputBudget(settings.openaiModel)
+
   const request = {
     model: settings.openaiModel,
     instructions: buildSystemPrompt(),
@@ -115,24 +118,47 @@ async function runAnalysisPipeline(
       },
     },
     store: false as const,
-    temperature: 0.2,
-    max_output_tokens: 4096,
+    // Analysis is structured extraction, not creative generation — effort: 'low' is appropriate
+    // and reduces reasoning-token consumption for reasoning models.
+    ...buildSamplingOptions(settings.openaiModel, { standardTemperature: 0.2, reasoningEffort: 'low' }),
+    max_output_tokens: outputBudget,
   }
 
   // ── Call API ───────────────────────────────────────────────────────────────
 
-  devLog('call-api', { model: settings.openaiModel })
+  devLog('call-api', { model: settings.openaiModel, outputBudget })
   const response = await callResponsesAPI(request, settings.openaiApiKey, signal)
 
+  // Safe usage diagnostics — token counts only, no content or personal data.
   devLog('response-received', {
     status: response.status,
+    model: response.model,
+    inputTokens: response.usage?.input_tokens,
+    outputTokens: response.usage?.output_tokens,
+    reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens,
+    outputBudget,
     outputItemTypes: response.output.map((item) => item.type),
   })
 
   if (response.status === 'incomplete') {
+    const reason = response.incomplete_details?.reason ?? 'unknown'
+    devLog('response-incomplete', {
+      reason,
+      inputTokens: response.usage?.input_tokens,
+      outputTokens: response.usage?.output_tokens,
+      reasoningTokens: response.usage?.output_tokens_details?.reasoning_tokens,
+      outputBudget,
+      model: response.model,
+    })
+    if (reason === 'max_output_tokens') {
+      throwAnalysisError(
+        'RESPONSE_INCOMPLETE',
+        'The analysis was cut off (output token limit reached). The job description or profile may be too long. Try shortening your profile descriptions.',
+      )
+    }
     throwAnalysisError(
       'RESPONSE_INCOMPLETE',
-      'The analysis was cut off (output limit reached). The job description or profile may be too long.',
+      `The analysis was interrupted (reason: ${reason}). Please retry.`,
     )
   }
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { generateApplication, isApplicationError, canonicalizeEducationAndLanguages, enrichProjectUrls } from '@/services/applicationService'
 import { parseAndValidateApplication, verifyApplicationSources } from '@/utils/applicationValidator'
 import { buildApplicationUserMessage, buildApplicationSystemPrompt } from '@/prompts/generateApplication'
+import { buildSourceTokenMap } from '@/utils/sourceTokenMap'
 import type { MasterProfile } from '@/types/profile'
 import type { ExtensionSettings } from '@/types/settings'
 import type { ValidatedAnalysis, JobAnalysis } from '@/types/jobAnalysis'
@@ -155,6 +156,55 @@ function makeValidApplication(): GeneratedApplication {
   }
 }
 
+/**
+ * What the AI actually returns: short source tokens (EXP_N, PROJ_N) instead of
+ * raw UUIDs. Used for integration tests that go through the full generateApplication
+ * pipeline (token resolution → canonicalization → verification).
+ */
+function makeTokenApplication(): GeneratedApplication {
+  return {
+    coverLetter: {
+      language: 'en',
+      subject: 'Application for TypeScript Engineer at TechCo',
+      body: 'Dear Hiring Manager, I am writing to apply for the TypeScript Engineer position at TechCo. With over four years of experience building TypeScript APIs and Vue dashboards at Acme Corp, I bring proven frontend expertise. My Open Logger project demonstrates strong systems thinking. I am confident I can contribute immediately to your team. Looking forward to discussing further. Best regards, Jana Nováková',
+    },
+    cv: {
+      language: 'en',
+      professionalTitle: 'Senior Frontend Engineer',
+      professionalSummary:
+        'Experienced engineer specializing in TypeScript and Vue.js. Proven track record of building production APIs and dashboards.',
+      technicalSkills: ['TypeScript', 'Vue.js', 'REST APIs', 'Rust'],
+      experience: [
+        {
+          sourceId: 'EXP_1',
+          company: 'Acme Corp',
+          position: 'Software Engineer',
+          startDate: '2020-01',
+          endDate: null,
+          highlights: ['Built TypeScript APIs serving production traffic', 'Developed Vue dashboards for internal teams'],
+        },
+      ],
+      projects: [
+        {
+          sourceId: 'PROJ_1',
+          name: 'Open Logger',
+          role: 'Lead',
+          highlights: ['Authored Rust-based structured logging library', 'Maintained open source release'],
+        },
+      ],
+      education: [
+        {
+          sourceId: 'EDU_1',
+          institution: 'Czech Technical University',
+          degree: 'Bachelor',
+          field: 'Computer Science',
+        },
+      ],
+      languages: [{ sourceId: 'LANG_1', language: 'Czech', proficiency: 'Native' }],
+    },
+  }
+}
+
 function makeApiResponse(application: GeneratedApplication) {
   return {
     id: 'resp-123',
@@ -293,7 +343,7 @@ describe('generateApplication — response parsing', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
   it('returns GeneratedApplication on valid response', async () => {
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(
       JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings(),
@@ -301,6 +351,8 @@ describe('generateApplication — response parsing', () => {
     expect(result.coverLetter.subject).toBe(app.coverLetter.subject)
     expect(result.cv.professionalTitle).toBe(app.cv.professionalTitle)
     expect(result.cv.experience).toHaveLength(1)
+    // Token EXP_1 must be resolved to the canonical profile UUID
+    expect(result.cv.experience[0]!.sourceId).toBe('exp-1')
   })
 
   it('throws RESPONSE_INCOMPLETE when status is incomplete', async () => {
@@ -358,7 +410,7 @@ describe('generateApplication — response parsing', () => {
   it('succeeds and uses canonical education even when AI returns invalid education sourceId', async () => {
     // Education/languages are replaced with profile canonical values before source verification,
     // so an invalid AI education sourceId no longer causes INVALID_SOURCE_IDS.
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.cv.education[0].sourceId = 'edu-nonexistent'
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(
@@ -369,7 +421,7 @@ describe('generateApplication — response parsing', () => {
   })
 
   it('succeeds and uses canonical language even when AI returns invalid language sourceId', async () => {
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.cv.languages[0].sourceId = 'lang-nonexistent'
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(
@@ -387,7 +439,7 @@ describe('generateApplication — language support', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
   it('passes English language through to response', async () => {
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.coverLetter.language = 'en'
     app.cv.language = 'en'
     mockFetch(makeApiResponse(app))
@@ -399,7 +451,7 @@ describe('generateApplication — language support', () => {
   })
 
   it('passes Czech language through to response', async () => {
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.coverLetter.language = 'cs'
     app.cv.language = 'cs'
     mockFetch(makeApiResponse(app))
@@ -420,51 +472,51 @@ describe('generateApplication — profile transmission', () => {
   it('includes experience EXP-IDs in user message', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchMock)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.input[0].content).toContain('[EXP-ID: exp-1]')
+    expect(body.input[0].content).toContain('[EXP-ID: EXP_1]')
   })
 
   it('includes project PROJ-IDs in user message', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchMock)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.input[0].content).toContain('[PROJ-ID: proj-1]')
+    expect(body.input[0].content).toContain('[PROJ-ID: PROJ_1]')
   })
 
   it('includes education EDU-IDs in user message', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchMock)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.input[0].content).toContain('[EDU-ID: edu-1]')
+    expect(body.input[0].content).toContain('[EDU-ID: EDU_1]')
   })
 
   it('includes language LANG-IDs in user message', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchMock)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.input[0].content).toContain('[LANG-ID: lang-1]')
+    expect(body.input[0].content).toContain('[LANG-ID: LANG_1]')
   })
 
   it('includes job analysis relevant experience in user message', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchMock)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
@@ -589,47 +641,48 @@ describe('verifyApplicationSources', () => {
 describe('buildApplicationUserMessage', () => {
   const analysis = makeValidatedAnalysis()
   const profile = makeProfile()
+  const tokenMap = buildSourceTokenMap(profile)
 
   it('includes requested language tag', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'cs')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'cs', tokenMap)
     expect(msg).toContain('<REQUESTED_LANGUAGE>cs</REQUESTED_LANGUAGE>')
   })
 
   it('includes job vacancy data', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
     expect(msg).toContain('<JOB_VACANCY_DATA>')
     expect(msg).toContain(JOB_DESC)
   })
 
   it('includes job analysis section', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
     expect(msg).toContain('<JOB_ANALYSIS>')
     expect(msg).toContain('TypeScript Engineer')
   })
 
-  it('includes candidate profile data with EXP-IDs', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
-    expect(msg).toContain('[EXP-ID: exp-1]')
+  it('includes candidate profile data with EXP-IDs as short tokens', () => {
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
+    expect(msg).toContain('[EXP-ID: EXP_1]')
     expect(msg).toContain('Acme Corp')
   })
 
-  it('includes EDU-IDs in education section', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
-    expect(msg).toContain('[EDU-ID: edu-1]')
+  it('includes EDU-IDs in education section as short tokens', () => {
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
+    expect(msg).toContain('[EDU-ID: EDU_1]')
   })
 
-  it('includes LANG-IDs in language section', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
-    expect(msg).toContain('[LANG-ID: lang-1]')
+  it('includes LANG-IDs in language section as short tokens', () => {
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
+    expect(msg).toContain('[LANG-ID: LANG_1]')
   })
 
   it('includes relevant experience reasons from job analysis', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
     expect(msg).toContain('Direct frontend experience')
   })
 
   it('includes supported requirement explanations', () => {
-    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', tokenMap)
     expect(msg).toContain('Profile shows TS experience')
   })
 })
@@ -652,9 +705,9 @@ describe('buildApplicationSystemPrompt', () => {
     expect(prompt).toContain('180')
   })
 
-  it('instructs the model to use exact sourceId', () => {
+  it('instructs the model to use exact short token', () => {
     const prompt = buildApplicationSystemPrompt()
-    expect(prompt).toContain('EXACT sourceId')
+    expect(prompt).toContain('EXACT short token')
   })
 })
 
@@ -845,7 +898,7 @@ describe('generateApplication — canonical education and languages', () => {
         { id: 'edu-2', institution: 'Linux Foundation', degree: 'CKAD', field: 'Certified Kubernetes Developer', startDate: '2022-01', endDate: '2022-03', description: '' },
       ],
     })
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(JOB_DESC, profile, makeValidatedAnalysis(), 'en', makeSettings())
     expect(result.cv.education).toHaveLength(2)
@@ -854,7 +907,7 @@ describe('generateApplication — canonical education and languages', () => {
 
   it('returned cv uses exact profile institution name even if AI paraphrased it', async () => {
     const profile = makeProfile()
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.cv.education[0].institution = 'Technical University (paraphrased by AI)'
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(JOB_DESC, profile, makeValidatedAnalysis(), 'en', makeSettings())
@@ -869,7 +922,7 @@ describe('generateApplication — canonical education and languages', () => {
         { id: 'lang-3', language: 'German', proficiency: 'B1' },
       ],
     })
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(JOB_DESC, profile, makeValidatedAnalysis(), 'en', makeSettings())
     expect(result.cv.languages).toHaveLength(3)
@@ -879,7 +932,7 @@ describe('generateApplication — canonical education and languages', () => {
 
   it('returned cv uses exact profile proficiency level', async () => {
     const profile = makeProfile()
-    const app = makeValidApplication()
+    const app = makeTokenApplication()
     app.cv.languages[0].proficiency = 'Fluent (AI paraphrase)'
     mockFetch(makeApiResponse(app))
     const result = await generateApplication(JOB_DESC, profile, makeValidatedAnalysis(), 'en', makeSettings())
@@ -889,7 +942,7 @@ describe('generateApplication — canonical education and languages', () => {
   it('no additional OpenAI calls are made during canonicalization', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchSpy)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())
@@ -1009,13 +1062,13 @@ describe('generateApplication — canonical project URLs', () => {
         { id: 'proj-1', name: 'Open Logger', role: 'Lead', url: 'https://github.com/jane/logger', startDate: '2022-06', endDate: '2023-01', description: '' },
       ],
     })
-    mockFetch(makeApiResponse(makeValidApplication()))
+    mockFetch(makeApiResponse(makeTokenApplication()))
     const result = await generateApplication(JOB_DESC, profile, makeValidatedAnalysis(), 'en', makeSettings())
     expect(result.cv.projects[0]?.url).toBe('https://github.com/jane/logger')
   })
 
-  it('still throws INVALID_SOURCE_IDS when project sourceId is invalid (url enrichment runs after)', async () => {
-    const app = makeValidApplication()
+  it('still throws INVALID_SOURCE_IDS when project token is invalid (url enrichment runs after)', async () => {
+    const app = makeTokenApplication()
     app.cv.projects[0].sourceId = 'proj-nonexistent'
     mockFetch(makeApiResponse(app))
     await expect(
@@ -1026,7 +1079,7 @@ describe('generateApplication — canonical project URLs', () => {
   it('no additional OpenAI calls are made during URL enrichment', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true, status: 200,
-      json: () => Promise.resolve(makeApiResponse(makeValidApplication())),
+      json: () => Promise.resolve(makeApiResponse(makeTokenApplication())),
     })
     vi.stubGlobal('fetch', fetchSpy)
     await generateApplication(JOB_DESC, makeProfile(), makeValidatedAnalysis(), 'en', makeSettings())

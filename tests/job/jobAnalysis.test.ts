@@ -6,6 +6,7 @@ import type { MasterProfile } from '@/types/profile'
 import type { ExtensionSettings } from '@/types/settings'
 import type { JobAnalysis, JobRecommendation } from '@/types/jobAnalysis'
 import { buildApplicationUserMessage, buildApplicationSystemPrompt } from '@/prompts/generateApplication'
+import { buildSourceTokenMap } from '@/utils/sourceTokenMap'
 import type { ValidatedAnalysis } from '@/types/jobAnalysis'
 import { DEFAULT_OPENAI_MODEL } from '@/types/settings'
 
@@ -577,74 +578,82 @@ function makeValidatedAnalysis(overrides: Partial<JobAnalysis> = {}): ValidatedA
 
 describe('buildApplicationUserMessage — application strategy recommendations', () => {
   it('includes application_strategy recommendations in the message', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [{ category: 'application_strategy', text: 'Lead with TypeScript experience.' }],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).toContain('Lead with TypeScript experience.')
     expect(msg).toContain('Application strategy guidance')
   })
 
   it('excludes profile_improvement recommendations from the message', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [{ category: 'profile_improvement', text: 'Add a GitHub link to your profile.' }],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).not.toContain('Add a GitHub link')
   })
 
   it('includes strategy recs but not profile recs when both are present', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [
         { category: 'application_strategy', text: 'Emphasise Vue.js dashboards.' },
         { category: 'profile_improvement', text: 'Document metrics in experience.' },
       ],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).toContain('Emphasise Vue.js dashboards.')
     expect(msg).not.toContain('Document metrics in experience.')
   })
 
   it('omits the strategy guidance block entirely when no application_strategy recs exist', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [{ category: 'profile_improvement', text: 'Some profile tip.' }],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).not.toContain('Application strategy guidance')
   })
 
   it('omits the strategy guidance block when recommendations array is empty', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({ recommendations: [] })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).not.toContain('Application strategy guidance')
   })
 
   it('includes multiple application_strategy recommendations as separate bullets', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [
         { category: 'application_strategy', text: 'Open with TypeScript API work.' },
         { category: 'application_strategy', text: 'Mention Vue.js migration project.' },
       ],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).toContain('Open with TypeScript API work.')
     expect(msg).toContain('Mention Vue.js migration project.')
   })
 
   it('still includes supported requirement matches when strategy recs are present', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [{ category: 'application_strategy', text: 'Highlight TypeScript.' }],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     expect(msg).toContain('Supported requirements')
     expect(msg).toContain('TypeScript')
   })
 
   it('strategy guidance block appears inside <JOB_ANALYSIS> block', () => {
+    const profile = makeProfile()
     const analysis = makeValidatedAnalysis({
       recommendations: [{ category: 'application_strategy', text: 'Lead with open-source project.' }],
     })
-    const msg = buildApplicationUserMessage(JOB_DESC, makeProfile(), analysis, 'en')
+    const msg = buildApplicationUserMessage(JOB_DESC, profile, analysis, 'en', buildSourceTokenMap(profile))
     const stratStart = msg.indexOf('Application strategy guidance')
     const jobAnalysisClose = msg.indexOf('</JOB_ANALYSIS>')
     expect(stratStart).toBeGreaterThan(-1)
@@ -720,5 +729,319 @@ describe('analysisSeq stale-result prevention pattern', () => {
     const seq2 = captureSeq()
 
     expect(seq2 !== analysisSeq).toBe(false)
+  })
+})
+
+// ── analyzeJob — model-aware token budgets ────────────────────────────────────
+
+describe('analyzeJob — model-aware token budgets', () => {
+  beforeEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('sends max_output_tokens: 6144 for a standard model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-4o-mini' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.max_output_tokens).toBe(6144)
+  })
+
+  it('sends max_output_tokens: 8192 for a reasoning model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-6.1-terra' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.max_output_tokens).toBe(8192)
+  })
+
+  it('sends reasoning.effort: "low" for a reasoning model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-6.1-terra' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.reasoning).toEqual({ effort: 'low' })
+  })
+
+  it('does not send temperature for a reasoning model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-6.1-terra' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect('temperature' in body).toBe(false)
+  })
+
+  it('sends temperature: 0.2 for a standard model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-4o-mini' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.temperature).toBe(0.2)
+  })
+})
+
+// ── analyzeJob — incomplete response reason handling ──────────────────────────
+
+describe('analyzeJob — incomplete response reason', () => {
+  beforeEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('throws RESPONSE_INCOMPLETE with token-limit message when reason is max_output_tokens', async () => {
+    mockFetch({
+      id: 'r', status: 'incomplete', model: DEFAULT_OPENAI_MODEL,
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [],
+      usage: { input_tokens: 3000, output_tokens: 6144, total_tokens: 9144 },
+    })
+    await expect(analyzeJob(JOB_DESC, makeProfile(), makeSettings())).rejects.toMatchObject({
+      code: 'RESPONSE_INCOMPLETE',
+      message: expect.stringContaining('output token limit'),
+    })
+  })
+
+  it('throws RESPONSE_INCOMPLETE with generic message when reason is content_filter', async () => {
+    mockFetch({
+      id: 'r', status: 'incomplete', model: DEFAULT_OPENAI_MODEL,
+      incomplete_details: { reason: 'content_filter' },
+      output: [],
+    })
+    await expect(analyzeJob(JOB_DESC, makeProfile(), makeSettings())).rejects.toMatchObject({
+      code: 'RESPONSE_INCOMPLETE',
+      message: expect.stringContaining('content_filter'),
+    })
+  })
+
+  it('throws RESPONSE_INCOMPLETE with generic message when reason is unknown', async () => {
+    mockFetch({
+      id: 'r', status: 'incomplete', model: DEFAULT_OPENAI_MODEL,
+      incomplete_details: { reason: 'some_new_reason' },
+      output: [],
+    })
+    await expect(analyzeJob(JOB_DESC, makeProfile(), makeSettings())).rejects.toMatchObject({
+      code: 'RESPONSE_INCOMPLETE',
+      message: expect.stringContaining('some_new_reason'),
+    })
+  })
+
+  it('throws RESPONSE_INCOMPLETE when incomplete_details is absent', async () => {
+    mockFetch({ id: 'r', status: 'incomplete', model: DEFAULT_OPENAI_MODEL, output: [] })
+    await expect(analyzeJob(JOB_DESC, makeProfile(), makeSettings())).rejects.toMatchObject({
+      code: 'RESPONSE_INCOMPLETE',
+    })
+  })
+
+  it('error message does not expose input tokens or personal data', async () => {
+    mockFetch({
+      id: 'r', status: 'incomplete', model: DEFAULT_OPENAI_MODEL,
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [],
+      usage: { input_tokens: 55000, output_tokens: 6144, total_tokens: 61144 },
+    })
+    await expect(analyzeJob(JOB_DESC, makeProfile(), makeSettings())).rejects.toMatchObject({
+      code: 'RESPONSE_INCOMPLETE',
+      message: expect.not.stringContaining('55000'),
+    })
+  })
+})
+
+// ── analyzeJob — usage fields and reasoning tokens ────────────────────────────
+
+describe('analyzeJob — usage fields', () => {
+  beforeEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('succeeds when usage is absent from the response', async () => {
+    const response = {
+      id: 'r', status: 'completed', model: DEFAULT_OPENAI_MODEL,
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(makeValidAnalysis()) }] }],
+      // no usage field
+    }
+    mockFetch(response)
+    const result = await analyzeJob(JOB_DESC, makeProfile(), makeSettings())
+    expect(result.analysis.job.title).toBe('TypeScript Engineer')
+  })
+
+  it('succeeds when output_tokens_details is absent', async () => {
+    const response = {
+      id: 'r', status: 'completed', model: DEFAULT_OPENAI_MODEL,
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(makeValidAnalysis()) }] }],
+      usage: { input_tokens: 1200, output_tokens: 980, total_tokens: 2180 },
+      // no output_tokens_details
+    }
+    mockFetch(response)
+    const result = await analyzeJob(JOB_DESC, makeProfile(), makeSettings())
+    expect(result.analysis.job.title).toBe('TypeScript Engineer')
+  })
+
+  it('succeeds when reasoning_tokens is present', async () => {
+    const response = {
+      id: 'r', status: 'completed', model: 'gpt-6.1-terra',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(makeValidAnalysis()) }] }],
+      usage: {
+        input_tokens: 1500,
+        output_tokens: 2048,
+        total_tokens: 3548,
+        output_tokens_details: { reasoning_tokens: 768 },
+      },
+    }
+    mockFetch(response)
+    const result = await analyzeJob(JOB_DESC, makeProfile(), makeSettings({ openaiModel: 'gpt-6.1-terra' }))
+    expect(result.analysis.job.title).toBe('TypeScript Engineer')
+  })
+
+  it('makes exactly one API call regardless of usage content', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({
+        ...makeApiResponse(makeValidAnalysis()),
+        usage: { input_tokens: 2000, output_tokens: 1500, total_tokens: 3500,
+          output_tokens_details: { reasoning_tokens: 256 } },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    await analyzeJob(JOB_DESC, makeProfile(), makeSettings())
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── analyzeJob — large profile ────────────────────────────────────────────────
+
+describe('analyzeJob — large profile', () => {
+  beforeEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  function makeLargeProfile(): MasterProfile {
+    return makeProfile({
+      experience: [
+        { id: 'exp-1', company: 'TravelTech', position: 'Senior Software Engineer', location: 'Prague', startDate: '2021-03', endDate: null, description: 'Led development of a distributed booking system handling 50k daily reservations. Built TypeScript/Node.js microservices, Vue 3 frontend, PostgreSQL and Redis datastores. Responsible for CI/CD pipelines using GitHub Actions and Docker. Mentored two junior developers. Implemented PCI-DSS compliance for payment flows. Reduced API latency by 40% through query optimisation and caching strategies.' },
+        { id: 'exp-2', company: 'LogisticsPlus', position: 'Full-stack Developer', location: 'Brno', startDate: '2018-06', endDate: '2021-02', description: 'Developed fleet tracking dashboard using React and Express.js. Integrated real-time GPS feeds via WebSockets. Built RESTful API consumed by mobile teams. Wrote comprehensive integration tests with Jest.' },
+        { id: 'exp-3', company: 'StartupX', position: 'Frontend Developer', location: 'Prague', startDate: '2016-01', endDate: '2018-05', description: 'Built marketing landing pages and admin portals using Angular and Bootstrap. Collaborated with UX designers to implement pixel-perfect components. Performance optimisation using Lighthouse audits.' },
+      ],
+      projects: [
+        { id: 'proj-1', name: 'OpenMetrics', role: 'Lead', url: 'https://github.com/jan/openmetrics', startDate: '2022-01', endDate: null, description: 'Open source Prometheus-compatible metrics aggregation library in Go. 400+ GitHub stars. Implements histogram, gauge, and counter types with label support.' },
+        { id: 'proj-2', name: 'VueCRUD', role: 'Author', url: '', startDate: '2020-06', endDate: '2021-06', description: 'Vue 3 composable library for CRUD operations against REST APIs. Used in 3 production projects.' },
+      ],
+      education: [
+        { id: 'edu-1', institution: 'Czech Technical University in Prague', degree: 'Bachelor of Science', field: 'Computer Science', startDate: '2012-09', endDate: '2016-06', description: 'Specialisation in distributed systems and software engineering.' },
+      ],
+      languages: [
+        { id: 'lang-1', language: 'Czech', proficiency: 'Native' },
+        { id: 'lang-2', language: 'English', proficiency: 'C1' },
+        { id: 'lang-3', language: 'German', proficiency: 'B1' },
+      ],
+      generalNotes: 'Open to relocation to Berlin or Vienna. Active open-source contributor. Speaker at DevConf.cz 2023 on microservices observability.',
+    })
+  }
+
+  it('passes the large profile to the API without truncation or error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const result = await analyzeJob(JOB_DESC, makeLargeProfile(), makeSettings())
+    expect(result.analysis.job.title).toBe('TypeScript Engineer')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('includes all profile experience entries in the user message', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve(makeApiResponse(makeValidAnalysis())),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await analyzeJob(JOB_DESC, makeLargeProfile(), makeSettings())
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    const content: string = body.input[0].content
+    expect(content).toContain('TravelTech')
+    expect(content).toContain('LogisticsPlus')
+    expect(content).toContain('StartupX')
+  })
+
+  it('source ID validation still works for a large profile', async () => {
+    const analysis = makeValidAnalysis()
+    // Add valid evidence pointing to a large-profile experience entry
+    analysis.matches[0].evidence = [{
+      sourceType: 'experience', sourceId: 'exp-2', supportingExcerpt: 'fleet tracking dashboard',
+    }]
+    mockFetch(makeApiResponse(analysis))
+    const result = await analyzeJob(JOB_DESC, makeLargeProfile(), makeSettings())
+    expect(result.issues.some((i) => i.type === 'invalid-source-id')).toBe(false)
+  })
+})
+
+// ── analyzeJob — no silent requirement loss ───────────────────────────────────
+
+describe('analyzeJob — source ID validation preserved', () => {
+  beforeEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('flags evidence referencing a non-existent experience ID', async () => {
+    const analysis = makeValidAnalysis()
+    analysis.matches[0].evidence = [{
+      sourceType: 'experience', sourceId: 'exp-nonexistent', supportingExcerpt: 'some excerpt',
+    }]
+    mockFetch(makeApiResponse(analysis))
+    const result = await analyzeJob(JOB_DESC, makeProfile(), makeSettings())
+    expect(result.issues.some((i) => i.type === 'invalid-source-id')).toBe(true)
+  })
+
+  it('does not throw on source ID issues — returns issues array instead', async () => {
+    const analysis = makeValidAnalysis()
+    analysis.matches[0].evidence = [{
+      sourceType: 'experience', sourceId: 'exp-nonexistent', supportingExcerpt: 'excerpt',
+    }]
+    mockFetch(makeApiResponse(analysis))
+    const result = await analyzeJob(JOB_DESC, makeProfile(), makeSettings())
+    expect(result.analysis.job.title).toBe('TypeScript Engineer')
+    expect(result.issues.length).toBeGreaterThan(0)
+  })
+})
+
+// ── buildSystemPrompt — conciseness rules ─────────────────────────────────────
+
+describe('buildSystemPrompt — output conciseness rules', () => {
+  it('instructs the model to keep explanations to 1–2 sentences', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('1–2 sentences')
+  })
+
+  it('instructs the model to limit supportingExcerpt to 25 words', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('25 words')
+  })
+
+  it('instructs the model to extract at most 15 requirements', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('15')
+  })
+
+  it('instructs the model to provide at most 2 evidence items per match', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('2 evidence items')
+  })
+
+  it('still instructs the model to use exact source IDs', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('EXACT source ID')
+  })
+
+  it('still instructs the model never to invent anything', () => {
+    const prompt = buildSystemPrompt()
+    expect(prompt).toContain('NEVER invent')
   })
 })
